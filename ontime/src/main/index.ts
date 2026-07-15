@@ -161,6 +161,13 @@ function tick() {
     const total = activeCue?.durationMs ?? 0;
     const pct = total > 0 ? remainingMs / total : 0;
     
+    // Show "Time's up" flash 1 minute before auto-advance
+    if (activeCue?.autoAdvance && remainingMs > 0 && remainingMs <= 60000 && remainingMs > 59000) {
+      if (!snapshot.message?.visible || snapshot.message.text !== "Time's up") {
+        setMessage({ text: "Time's up", style: 'flash', visible: true, autoClearMs: 5000 });
+      }
+    }
+    
     if (pct <= settings.warningPct && pct > 0 && remainingMs > 0) {
       if (!snapshot.message?.visible || snapshot.message.style !== 'flash') {
         setMessage({ text: 'WARNING', style: 'flash', visible: true });

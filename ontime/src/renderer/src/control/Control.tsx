@@ -3,7 +3,7 @@ import { useState, useEffect, useMemo } from 'react'
 
 export function Control({ snapshot, onAction }: { snapshot: Snapshot; onAction: any }) {
   const { timer, remainingMs, program, activeTitle, message, blackout, settings } = snapshot
-  const [editingCue, setEditingCue] = useState<Cue | null>(null)
+  const [editingCueId, setEditingCueId] = useState<string | null>(null)
   const [newCueTitle, setNewCueTitle] = useState('')
   const [newCueDuration, setNewCueDuration] = useState(5)
   const [showSettings, setShowSettings] = useState(false)
@@ -25,12 +25,11 @@ export function Control({ snapshot, onAction }: { snapshot: Snapshot; onAction: 
       ...program,
       cues: [
         ...program.cues,
-        { id: Date.now().toString(), title: newCueTitle, durationMs: newCueDuration * 60 * 1000, autoAdvance: editingCue?.autoAdvance || false }
+        { id: Date.now().toString(), title: newCueTitle, durationMs: newCueDuration * 60 * 1000, autoAdvance: false }
       ]
     }
     onAction('update-program', newProgram)
     setNewCueTitle('')
-    setEditingCue(null)
   }
 
   const handleUpdateCue = (cue: Cue) => {
@@ -39,7 +38,7 @@ export function Control({ snapshot, onAction }: { snapshot: Snapshot; onAction: 
       cues: program.cues.map(c => c.id === cue.id ? cue : c)
     }
     onAction('update-program', newProgram)
-    setEditingCue(null)
+    setEditingCueId(null)
   }
 
   const handleDeleteCue = (id: string) => {
@@ -50,14 +49,12 @@ export function Control({ snapshot, onAction }: { snapshot: Snapshot; onAction: 
     onAction('update-program', newProgram)
   }
 
-  const handleReorder = (fromIdx: number, toIdx: number) => {
-    const newCues = [...program.cues]
-    const [removed] = newCues.splice(fromIdx, 1)
-    newCues.splice(toIdx, 0, removed)
-    onAction('update-program', { ...program, cues: newCues })
+  const nudgeDuration = (id: string, deltaMs: number) => {
+    const cue = program.cues.find(c => c.id === id)
+    if (!cue) return
+    handleUpdateCue({ ...cue, durationMs: Math.max(60000, cue.durationMs + deltaMs) })
   }
 
-  // Load displays on mount
   useEffect(() => {
     window.displays?.getAll().then(setDisplays).catch(() => {})
   }, [])
@@ -79,75 +76,98 @@ export function Control({ snapshot, onAction }: { snapshot: Snapshot; onAction: 
       <div className="panel rundown-panel">
         <div className="panel-header">
           <h2>Rundown</h2>
-          <button className="btn-add" onClick={() => setEditingCue({ id: '', title: '', durationMs: 5 * 60 * 1000 })}>
+          <button className="btn-add" onClick={() => setEditingCueId('new')}>
             + Add Segment
           </button>
         </div>
         <div className="cues-list">
-          {program.cues.map((cue, idx) => (
-            <div key={cue.id} className={`cue-item ${timer.activeCueId === cue.id ? 'active' : ''}`}>
-              <div className="cue-drag" onMouseDown={() => {}}>⋮⋮</div>
+          {program.cues.map((cue, idx) => {
+            const isActive = timer.activeCueId === cue.id
+            const isEditing = editingCueId === cue.id
+            
+            if (isEditing) {
+              return (
+                <div key={cue.id} className="cue-item editing">
+                  <input
+                    type="text"
+                    value={cue.title}
+                    onChange={e => setEditingCueId(cue.id)}
+                    onBlur={() => handleUpdateCue({ ...cue, title: e.target.value })}
+                    onKeyDown={e => e.key === 'Enter' && handleUpdateCue({ ...cue, title: e.target.value })}
+                    className="cue-title edit"
+                    autoFocus
+                  />
+                  <div className="duration-edit">
+                    <button className="btn-duration" onClick={() => nudgeDuration(cue.id, -60000)}>-1m</button>
+                    <input
+                      type="number"
+                      value={Math.round(cue.durationMs / 60000)}
+                      onChange={e => handleUpdateCue({ ...cue, durationMs: Math.max(1, parseInt(e.target.value) || 1) * 60000 })}
+                      className="cue-duration edit"
+                      min="1"
+                    />
+                    <button className="btn-duration" onClick={() => nudgeDuration(cue.id, 60000)}>+1m</button>
+                    <span className="cue-unit">min</span>
+                  </div>
+                  <div className="cue-actions">
+                    <button className="btn-save" onClick={() => handleUpdateCue(cue)}>Save</button>
+                    <button className="btn-cancel" onClick={() => setEditingCueId(null)}>Cancel</button>
+                    <button className="btn-delete" onClick={() => handleDeleteCue(cue.id)}>Delete</button>
+                  </div>
+                </div>
+              )
+            }
+            
+            return (
+              <div key={cue.id} className={`cue-item ${isActive ? 'active' : ''}`}>
+                <div className="cue-drag">⋮⋮</div>
+                <span className="cue-title-display" onClick={() => setEditingCueId(cue.id)}>
+                  {cue.title}
+                </span>
+                <span className="cue-duration-display">{formatMs(cue.durationMs)}</span>
+                <label className="auto-toggle" title={cue.autoAdvance ? 'Auto-advance ON' : 'Auto-advance OFF'}>
+                  <input
+                    type="checkbox"
+                    checked={cue.autoAdvance || false}
+                    onChange={e => handleUpdateCue({ ...cue, autoAdvance: e.target.checked })}
+                  />
+                  <span className="auto-label">↷</span>
+                </label>
+                <button className="btn-edit" onClick={() => setEditingCueId(cue.id)}>✎</button>
+                <button className="btn-delete" onClick={() => handleDeleteCue(cue.id)}>×</button>
+              </div>
+            )
+          })}
+          {editingCueId === 'new' && (
+            <div className="cue-item new-cue">
               <input
                 type="text"
-                value={cue.title}
-                onChange={e => setEditingCue({ ...cue, title: e.target.value })}
-                onBlur={() => editingCue?.id && handleUpdateCue(editingCue)}
-                onKeyDown={e => e.key === 'Enter' && editingCue?.id && handleUpdateCue(editingCue)}
-                className="cue-title"
+                value={newCueTitle}
+                onChange={e => setNewCueTitle(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAddCue()}
+                placeholder="Segment title"
+                className="cue-title edit"
+                autoFocus
               />
-              <input
-                type="number"
-                value={Math.round(cue.durationMs / 60000)}
-                onChange={e => setEditingCue({ ...cue, durationMs: Math.max(0, parseInt(e.target.value) || 0) * 60000 })}
-                onBlur={() => editingCue?.id && handleUpdateCue(editingCue)}
-                className="cue-duration"
-                min="0"
-              />
-              <span className="cue-unit">min</span>
-              <label className="checkbox-label" style={{marginLeft: '8px'}}>
+              <div className="duration-edit">
+                <button className="btn-duration" onClick={() => setNewCueDuration(Math.max(1, newCueDuration - 1))}>-1m</button>
                 <input
-                  type="checkbox"
-                  checked={cue.autoAdvance || false}
-                  onChange={e => handleUpdateCue({ ...cue, autoAdvance: e.target.checked })}
+                  type="number"
+                  value={newCueDuration}
+                  onChange={e => setNewCueDuration(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="cue-duration edit"
+                  min="1"
                 />
-                ↷ Auto
-              </label>
-              <button className="btn-delete" onClick={() => handleDeleteCue(cue.id)}>×</button>
+                <button className="btn-duration" onClick={() => setNewCueDuration(newCueDuration + 1)}>+1m</button>
+                <span className="cue-unit">min</span>
+              </div>
+              <div className="cue-actions">
+                <button className="btn-save" onClick={handleAddCue}>Add</button>
+                <button className="btn-cancel" onClick={() => setEditingCueId(null)}>Cancel</button>
+              </div>
             </div>
-          ))}
+          )}
         </div>
-        {editingCue && !editingCue.id && (
-          <div className="cue-item new-cue">
-            <input
-              type="text"
-              value={newCueTitle}
-              onChange={e => setNewCueTitle(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleAddCue()}
-              placeholder="Segment title"
-              className="cue-title"
-              autoFocus
-            />
-            <input
-              type="number"
-              value={newCueDuration}
-              onChange={e => setNewCueDuration(Math.max(0, parseInt(e.target.value) || 0))}
-              onKeyDown={e => e.key === 'Enter' && handleAddCue()}
-              className="cue-duration"
-              min="0"
-            />
-            <span className="cue-unit">min</span>
-            <label className="checkbox-label" style={{marginLeft: '8px'}}>
-              <input
-                type="checkbox"
-                checked={false}
-                onChange={e => setEditingCue({ ...editingCue, autoAdvance: e.target.checked })}
-              />
-              ↷ Auto
-            </label>
-            <button className="btn-add" onClick={handleAddCue}>Add</button>
-            <button className="btn-cancel" onClick={() => setEditingCue(null)}>Cancel</button>
-          </div>
-        )}
       </div>
 
       {/* CENTER PANEL - Timer Controls */}
@@ -198,7 +218,7 @@ export function Control({ snapshot, onAction }: { snapshot: Snapshot; onAction: 
         </div>
       </div>
 
-      {/* RIGHT PANEL - Preview Display + Messages */}
+      {/* RIGHT PANEL - Preview + Messages (stacked vertically) */}
       <div className="panel preview-panel">
         {/* 16:9 Preview Display */}
         <div className="preview-display-container">
