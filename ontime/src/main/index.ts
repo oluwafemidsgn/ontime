@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, globalShortcut } from 'electron';
+import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { join } from 'path';
 import { is } from '@electron-toolkit/utils';
 import { 
@@ -369,20 +369,6 @@ function stopTicker() {
   }
 }
 
-function registerShortcuts() {
-  globalShortcut.register('Space', () => {
-    if (snapshot.timer.running) pauseTimer();
-    else startTimer();
-    broadcastSnapshot();
-  });
-  
-  globalShortcut.register('Right', () => advanceCue());
-  globalShortcut.register('Left', () => previousCue());
-  globalShortcut.register('R', () => resetTimer());
-  globalShortcut.register('B', () => setBlackout(!snapshot.blackout));
-  globalShortcut.register('M', () => setMessage(snapshot.message?.visible ? null : { text: 'MESSAGE', style: 'normal', visible: true }));
-}
-
 function setupIpc() {
   ipcMain.handle('get-snapshot', () => snapshot);
   
@@ -441,7 +427,6 @@ ipcMain.on('close-stage', () => stageWindow?.close());
 
 app.whenReady().then(() => {
   createMainWindow();
-  registerShortcuts();
   setupIpc();
   
   app.on('activate', () => {
@@ -450,12 +435,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  globalShortcut.unregisterAll();
   stopTicker();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
-  globalShortcut.unregisterAll();
   stopTicker();
 });
