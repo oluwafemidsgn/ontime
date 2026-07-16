@@ -1,7 +1,8 @@
 {
   "name": "ontime",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Stage timer app for live events",
+  "author": "oluwafemidsgn",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

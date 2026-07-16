@@ -9,7 +9,8 @@
     "out/**/*"
   ],
   "win": {
-    "target": "nsis"
+    "target": "nsis",
+    "icon": "resources/icon.ico"
   },
   "nsis": {
     "oneClick": false,
@@ -17,7 +18,9 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "ontime"
+    "shortcutName": "ontime",
+    "installerIcon": "resources/icon.ico",
+    "uninstallerIcon": "resources/icon.ico"
   },
   "extraResources": []
 }
