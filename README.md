@@ -13,6 +13,12 @@ messages to a second screen over HDMI — like an operator/output console, but f
 
 </div>
 
+<br />
+
+![ontime control window](docs/screenshot.png)
+
+<div align="center"><sub>The operator's Control window — rundown, live timer, output preview and messages.</sub></div>
+
 ---
 
 ## What it is
