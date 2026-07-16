@@ -1,317 +1,482 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
-import { join } from 'path';
-import { is } from '@electron-toolkit/utils';
-import { 
-  TimerState, 
-  Program, 
-  Cue, 
-  Snapshot, 
-  Settings, 
+import { app, BrowserWindow, ipcMain, screen, Display } from 'electron'
+import { join } from 'path'
+import { readFileSync, writeFileSync } from 'fs'
+import { is } from '@electron-toolkit/utils'
+import {
+  Program,
+  Snapshot,
+  Settings,
   Message,
+  TimerMode,
   DEFAULT_SETTINGS,
   DEFAULT_PROGRAM,
   DEFAULT_TIMER_STATE,
-  DEFAULT_MESSAGE
-} from './types';
+} from './types'
 
-let mainWindow: BrowserWindow | null = null;
-let stageWindow: BrowserWindow | null = null;
-let displayWindow: BrowserWindow | null = null;
+let controlWindow: BrowserWindow | null = null
+let displayWindow: BrowserWindow | null = null
+let tickInterval: NodeJS.Timeout | null = null
+let messageClearTimer: NodeJS.Timeout | null = null
+let saveTimer: NodeJS.Timeout | null = null
+
+// ---------------------------------------------------------------------------
+// Persistence (program + settings survive restarts)
+// ---------------------------------------------------------------------------
+
+function storePath(): string {
+  return join(app.getPath('userData'), 'ontime-store.json')
+}
+
+function loadStore(): { program?: Program; settings?: Settings } {
+  try {
+    return JSON.parse(readFileSync(storePath(), 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
+function persist(): void {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    try {
+      writeFileSync(
+        storePath(),
+        JSON.stringify({ program: snapshot.program, settings: snapshot.settings })
+      )
+    } catch {
+      /* non-fatal */
+    }
+  }, 400)
+}
+
+const persisted = loadStore()
 
 let snapshot: Snapshot = {
   timer: { ...DEFAULT_TIMER_STATE },
-  remainingMs: DEFAULT_PROGRAM.cues[0]?.durationMs ?? 300000,
-  program: { ...DEFAULT_PROGRAM },
+  remainingMs: (persisted.program ?? DEFAULT_PROGRAM).cues[0]?.durationMs ?? 300000,
+  program: persisted.program ?? { ...DEFAULT_PROGRAM },
   activeTitle: '',
-  message: DEFAULT_MESSAGE,
+  message: null,
   blackout: false,
-  settings: { ...DEFAULT_SETTINGS },
-};
+  settings: { ...DEFAULT_SETTINGS, ...(persisted.settings ?? {}) },
+  phase: 'normal',
+  overMs: 0,
+  upNext: null,
+}
 
-let timerInterval: NodeJS.Timeout | null = null;
-let tickInterval: NodeJS.Timeout | null = null;
+// End-of-segment sequence: TIME UP hold -> "up next" transition -> auto-advance.
+type EndSequence = { phase: 'timeup' | 'transition'; startedAt: number; nextCueId: string | null }
+let endSequence: EndSequence | null = null
 
-function createMainWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1400,
+// ---------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------
+
+function pickExternalDisplay(): Display {
+  const all = screen.getAllDisplays()
+  const primary = screen.getPrimaryDisplay()
+  return all.find((d) => d.id !== primary.id) ?? primary
+}
+
+function loadRenderer(win: BrowserWindow, hash?: string): void {
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}${hash ? `#${hash}` : ''}`)
+  } else {
+    win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined)
+  }
+}
+
+function createControlWindow(): void {
+  controlWindow = new BrowserWindow({
+    width: 1440,
     height: 900,
-    minWidth: 1200,
-    minHeight: 800,
-    title: 'ontime - Control',
+    minWidth: 900,
+    minHeight: 640,
+    backgroundColor: '#0a0a0b',
+    title: 'ontime — Control',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
     },
-  });
+  })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']);
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
-  }
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  loadRenderer(controlWindow)
+  controlWindow.on('closed', () => {
+    controlWindow = null
+  })
 }
 
-function createStageWindow() {
-  const displays = screen.getAllDisplays();
-  const external = displays.find(d => d.id !== displays[0]?.id) || displays[1] || displays[0];
-  
-  stageWindow = new BrowserWindow({
-    x: external.bounds.x,
-    y: external.bounds.y,
-    width: external.bounds.width,
-    height: external.bounds.height,
-    fullscreen: true,
-    fullscreenable: true,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    title: 'ontime - Stage Display',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-  });
+function createDisplayWindow(): void {
+  const external = pickExternalDisplay()
+  const isExternal = external.id !== screen.getPrimaryDisplay().id
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    stageWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#/stage`);
-  } else {
-    stageWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/stage' });
-  }
-
-  stageWindow.on('closed', () => {
-    stageWindow = null;
-  });
-}
-
-function createDisplayWindow() {
-  const displays = screen.getAllDisplays();
-  const external = displays.find(d => d.id !== displays[0]?.id) || displays[1] || displays[0];
-  
   displayWindow = new BrowserWindow({
     x: external.bounds.x,
     y: external.bounds.y,
-    width: external.bounds.width,
-    height: external.bounds.height,
-    fullscreen: true,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    title: 'ontime - Stage Display',
+    width: isExternal ? external.bounds.width : 960,
+    height: isExternal ? external.bounds.height : 540,
+    fullscreen: isExternal,
+    frame: !isExternal,
+    backgroundColor: '#000000',
+    alwaysOnTop: isExternal,
+    skipTaskbar: isExternal,
+    title: 'ontime — Display',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
     },
-  });
+  })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    displayWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}#/display`);
-  } else {
-    displayWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: '/display' });
-  }
-
+  loadRenderer(displayWindow, '/display')
+  displayWindow.webContents.on('did-finish-load', () => broadcastSnapshot())
   displayWindow.on('closed', () => {
-    displayWindow = null;
-  });
+    displayWindow = null
+    notifyDisplayState()
+  })
+  notifyDisplayState()
 }
 
-function broadcastSnapshot() {
-  const data = { ...snapshot };
-  mainWindow?.webContents.send('snapshot', data);
-  stageWindow?.webContents.send('snapshot', data);
-  displayWindow?.webContents.send('snapshot', data);
+function placeDisplayOnMonitor(target: Display): void {
+  if (!displayWindow) return
+  const isExternal = target.id !== screen.getPrimaryDisplay().id
+  displayWindow.setFullScreen(false)
+  displayWindow.setBounds(
+    isExternal
+      ? target.bounds
+      : { x: target.bounds.x + 60, y: target.bounds.y + 60, width: 960, height: 540 }
+  )
+  displayWindow.setAlwaysOnTop(isExternal)
+  if (isExternal) displayWindow.setFullScreen(true)
+}
+
+// ---------------------------------------------------------------------------
+// Broadcasting
+// ---------------------------------------------------------------------------
+
+/** Compute the visual phase + overtime/up-next info the renderers read. */
+function decorate(): void {
+  const { timer, remainingMs, settings, program } = snapshot
+  let phase: Snapshot['phase'] = 'normal'
+  let overMs = 0
+  let upNext: Snapshot['upNext'] = null
+
+  if (endSequence) {
+    if (endSequence.phase === 'timeup') {
+      phase = 'timeup'
+    } else {
+      phase = 'transition'
+      const remain = Math.max(0, settings.transitionSec * 1000 - (Date.now() - endSequence.startedAt))
+      const nextCue = program.cues.find((c) => c.id === endSequence!.nextCueId)
+      upNext = { title: nextCue?.title ?? 'End of program', countdownMs: remain }
+    }
+  } else if (timer.mode === 'countdown') {
+    if (remainingMs <= 0) {
+      phase = 'timeup'
+      overMs = Math.max(0, -remainingMs)
+    } else {
+      const dur = activeCue()?.durationMs ?? 0
+      if (dur > 0 && remainingMs / dur <= settings.warningPct) phase = 'warning'
+    }
+  }
+
+  snapshot.phase = phase
+  snapshot.overMs = overMs
+  snapshot.upNext = upNext
+}
+
+function broadcastSnapshot(): void {
+  decorate()
+  controlWindow?.webContents.send('snapshot', snapshot)
+  displayWindow?.webContents.send('snapshot', snapshot)
+}
+
+function notifyDisplayState(): void {
+  controlWindow?.webContents.send('display-state', !!displayWindow)
+}
+
+function serializeDisplays() {
+  return screen.getAllDisplays().map((d) => ({
+    id: d.id,
+    bounds: d.bounds,
+    size: d.size,
+    workArea: d.workArea,
+    scaleFactor: d.scaleFactor,
+    internal: d.internal,
+    rotation: d.rotation,
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// Timer engine — main process is the single source of truth (drift-free)
+// ---------------------------------------------------------------------------
+
+function activeCue() {
+  return snapshot.timer.activeCueId
+    ? snapshot.program.cues.find((c) => c.id === snapshot.timer.activeCueId)
+    : undefined
 }
 
 function computeRemainingMs(): number {
-  const { timer, program } = snapshot;
-  
-  if (timer.mode === 'clock') return 0;
-  
-  if (!timer.running) {
-    if (timer.pausedRemainingMs !== null) return timer.pausedRemainingMs;
-    if (timer.activeCueId) {
-      const cue = program.cues.find(c => c.id === timer.activeCueId);
-      return cue?.durationMs ?? 0;
-    }
-    return program.cues[0]?.durationMs ?? 0;
+  const { timer, program } = snapshot
+  const now = Date.now()
+
+  if (timer.mode === 'clock') return 0
+
+  if (timer.mode === 'countup') {
+    if (timer.running && timer.startTimestamp) return now - timer.startTimestamp
+    return timer.pausedRemainingMs ?? 0
   }
 
-  const now = Date.now();
-  if (timer.endTimestamp) {
-    return Math.max(0, timer.endTimestamp - now);
-  }
-  return timer.pausedRemainingMs ?? 0;
+  // countdown
+  if (timer.running && timer.endTimestamp !== null) return timer.endTimestamp - now
+  if (timer.pausedRemainingMs !== null) return timer.pausedRemainingMs
+  return activeCue()?.durationMs ?? program.cues[0]?.durationMs ?? 0
 }
 
-function tick() {
-  snapshot.remainingMs = computeRemainingMs();
-  broadcastSnapshot();
-  
-  const { timer, remainingMs, program, settings } = snapshot;
-  if (timer.running && timer.mode === 'countdown') {
-    const activeCue = timer.activeCueId ? program.cues.find(c => c.id === timer.activeCueId) : null;
-    const total = activeCue?.durationMs ?? 0;
-    const pct = total > 0 ? remainingMs / total : 0;
-    
-    // Show "Time's up" flash 1 minute before auto-advance
-    if (activeCue?.autoAdvance && remainingMs > 0 && remainingMs <= 60000 && remainingMs > 59000) {
-      if (!snapshot.message?.visible || snapshot.message.text !== "Time's up") {
-        setMessage({ text: "Time's up", style: 'flash', visible: true, autoClearMs: 5000 });
+function tick(): void {
+  const now = Date.now()
+
+  // Drive the end-of-segment sequence (TIME UP -> up-next transition -> start).
+  if (endSequence) {
+    const elapsed = now - endSequence.startedAt
+    if (endSequence.phase === 'timeup') {
+      if (elapsed >= snapshot.settings.timeUpSec * 1000) {
+        endSequence = { phase: 'transition', startedAt: now, nextCueId: endSequence.nextCueId }
       }
-    }
-    
-    if (pct <= settings.warningPct && pct > 0 && remainingMs > 0) {
-      if (!snapshot.message?.visible || snapshot.message.style !== 'flash') {
-        setMessage({ text: 'WARNING', style: 'flash', visible: true });
-      }
-    }
-    
-    if (remainingMs <= 0) {
-      if (settings.overtime && timer.mode === 'countdown') {
-        snapshot.timer.mode = 'countup';
-        snapshot.timer.startTimestamp = Date.now();
-        snapshot.timer.endTimestamp = null;
-      } else if (activeCue?.autoAdvance) {
-        // Auto-advance to next cue and start it
-        advanceCueAndStart();
+    } else if (elapsed >= snapshot.settings.transitionSec * 1000) {
+      const nextId = endSequence.nextCueId
+      endSequence = null
+      if (nextId) {
+        loadCueById(nextId)
+        startTimer()
       } else {
-        pauseTimer();
-        advanceCue();
+        snapshot.timer.activeCueId = null
+        snapshot.activeTitle = ''
+        snapshot.remainingMs = 0
+        stopTicker()
+        broadcastSnapshot()
       }
+      return
     }
+    snapshot.remainingMs = 0
+    broadcastSnapshot()
+    return
   }
-}
 
-function advanceCueAndStart() {
-  const { program, timer } = snapshot;
-  const idx = timer.activeCueId ? program.cues.findIndex(c => c.id === timer.activeCueId) : -1;
-  const nextIdx = idx + 1;
-  
-  if (nextIdx < program.cues.length) {
-    const nextCue = program.cues[nextIdx];
-    snapshot.timer.activeCueId = nextCue.id;
-    snapshot.activeTitle = nextCue.title;
-    snapshot.timer.running = false;
-    snapshot.timer.endTimestamp = null;
-    snapshot.timer.pausedRemainingMs = null;
-    snapshot.remainingMs = nextCue.durationMs;
-    
-    // Start the next cue automatically
-    startTimer();
-  } else {
-    snapshot.timer.running = false;
-    snapshot.timer.activeCueId = null;
-    snapshot.activeTitle = '';
-    snapshot.remainingMs = 0;
-    broadcastSnapshot();
-  }
-}
+  snapshot.remainingMs = computeRemainingMs()
 
-function startTimer() {
-  const { timer, program, remainingMs } = snapshot;
-  
-  if (timer.running) return;
-  
-  if (timer.mode === 'countdown' || timer.mode === 'countup') {
-    const activeCue = timer.activeCueId ? program.cues.find(c => c.id === timer.activeCueId) : program.cues[0];
-    if (!activeCue) return;
-    
-    snapshot.timer.activeCueId = activeCue.id;
-    snapshot.activeTitle = activeCue.title;
-    
-    if (timer.mode === 'countdown') {
-      const startMs = timer.pausedRemainingMs ?? remainingMs ?? activeCue.durationMs;
-      snapshot.timer.endTimestamp = Date.now() + startMs;
-      snapshot.timer.pausedRemainingMs = null;
-    } else if (timer.mode === 'countup') {
-      if (!timer.startTimestamp) {
-        snapshot.timer.startTimestamp = Date.now();
-      }
+  const { timer, remainingMs, settings, program } = snapshot
+  if (timer.running && timer.mode === 'countdown' && remainingMs <= 0) {
+    const cue = activeCue()
+    if (cue?.autoAdvance) {
+      const idx = program.cues.findIndex((c) => c.id === cue.id)
+      const next = program.cues[idx + 1]
+      timer.running = false
+      timer.endTimestamp = null
+      timer.pausedRemainingMs = null
+      snapshot.remainingMs = 0
+      endSequence = { phase: 'timeup', startedAt: now, nextCueId: next?.id ?? null }
+    } else if (!settings.overtime) {
+      stopAtZero()
     }
-    
-    snapshot.timer.running = true;
-  } else if (timer.mode === 'clock') {
-    snapshot.timer.running = true;
+    // else: overtime enabled -> keep running, remainingMs goes negative
   }
-  
-  startTicker();
-  broadcastSnapshot();
+
+  broadcastSnapshot()
 }
 
-function pauseTimer() {
-  if (!snapshot.timer.running) return;
-  
-  if (snapshot.timer.mode === 'countdown' && snapshot.timer.endTimestamp) {
-    snapshot.timer.pausedRemainingMs = Math.max(0, snapshot.timer.endTimestamp - Date.now());
+function clearEndSequence(): void {
+  endSequence = null
+}
+
+function startTicker(): void {
+  if (!tickInterval) tickInterval = setInterval(tick, 100)
+}
+
+function stopTicker(): void {
+  if (tickInterval) {
+    clearInterval(tickInterval)
+    tickInterval = null
   }
-  
-  snapshot.timer.running = false;
-  stopTicker();
-  broadcastSnapshot();
 }
 
-function resetTimer() {
-  stopTicker();
-  snapshot.timer = { ...DEFAULT_TIMER_STATE };
-  snapshot.remainingMs = snapshot.program.cues[0]?.durationMs ?? 300000;
-  snapshot.activeTitle = '';
-  broadcastSnapshot();
+function stopAtZero(): void {
+  snapshot.timer.running = false
+  snapshot.timer.endTimestamp = null
+  snapshot.timer.pausedRemainingMs = 0
+  snapshot.remainingMs = 0
+  stopTicker()
 }
 
-function advanceCue() {
-  const { program, timer } = snapshot;
-  const idx = timer.activeCueId ? program.cues.findIndex(c => c.id === timer.activeCueId) : -1;
-  const nextIdx = idx + 1;
-  
-  if (nextIdx < program.cues.length) {
-    const nextCue = program.cues[nextIdx];
-    snapshot.timer.activeCueId = nextCue.id;
-    snapshot.activeTitle = nextCue.title;
-    snapshot.timer.running = false;
-    snapshot.timer.endTimestamp = null;
-    snapshot.timer.pausedRemainingMs = null;
-    snapshot.remainingMs = nextCue.durationMs;
+function startTimer(): void {
+  // Pressing Start during the end sequence skips the countdown to the next cue.
+  if (endSequence) {
+    const nextId = endSequence.nextCueId
+    endSequence = null
+    if (nextId) loadCueById(nextId)
+  }
+  const { timer, program } = snapshot
+  if (timer.running) return
+
+  if (timer.mode === 'clock') {
+    timer.running = true
+    startTicker()
+    broadcastSnapshot()
+    return
+  }
+
+  const cue = activeCue() ?? program.cues[0]
+  if (!cue) return
+  timer.activeCueId = cue.id
+  snapshot.activeTitle = cue.title
+
+  const now = Date.now()
+  if (timer.mode === 'countdown') {
+    const remaining = timer.pausedRemainingMs ?? cue.durationMs
+    timer.endTimestamp = now + remaining
+    timer.pausedRemainingMs = null
   } else {
-    snapshot.timer.running = false;
-    snapshot.timer.activeCueId = null;
-    snapshot.activeTitle = '';
-    snapshot.remainingMs = 0;
+    // countup — resume from paused elapsed if present
+    const elapsed = timer.pausedRemainingMs ?? 0
+    timer.startTimestamp = now - elapsed
+    timer.pausedRemainingMs = null
   }
-  
-  broadcastSnapshot();
+
+  timer.running = true
+  startTicker()
+  broadcastSnapshot()
 }
 
-function previousCue() {
-  const { program, timer } = snapshot;
-  const idx = timer.activeCueId ? program.cues.findIndex(c => c.id === timer.activeCueId) : 0;
-  const prevIdx = Math.max(0, idx - 1);
-  
-  const prevCue = program.cues[prevIdx];
-  snapshot.timer.activeCueId = prevCue.id;
-  snapshot.activeTitle = prevCue.title;
-  snapshot.timer.running = false;
-  snapshot.timer.endTimestamp = null;
-  snapshot.timer.pausedRemainingMs = null;
-  snapshot.remainingMs = prevCue.durationMs;
-  
-  broadcastSnapshot();
+function pauseTimer(): void {
+  if (endSequence) {
+    endSequence = null
+    snapshot.remainingMs = 0
+    stopTicker()
+    broadcastSnapshot()
+    return
+  }
+  const { timer } = snapshot
+  if (!timer.running) return
+
+  const now = Date.now()
+  if (timer.mode === 'countdown' && timer.endTimestamp !== null) {
+    timer.pausedRemainingMs = timer.endTimestamp - now
+    timer.endTimestamp = null
+  } else if (timer.mode === 'countup' && timer.startTimestamp !== null) {
+    timer.pausedRemainingMs = now - timer.startTimestamp
+    timer.startTimestamp = null
+  }
+
+  timer.running = false
+  stopTicker()
+  snapshot.remainingMs = computeRemainingMs()
+  broadcastSnapshot()
 }
 
-function setMessage(msg: Message | null) {
+function resetTimer(): void {
+  clearEndSequence()
+  stopTicker()
+  const { timer, program } = snapshot
+  timer.running = false
+  timer.endTimestamp = null
+  timer.startTimestamp = null
+  timer.pausedRemainingMs = null
+  snapshot.remainingMs =
+    timer.mode === 'countup' ? 0 : activeCue()?.durationMs ?? program.cues[0]?.durationMs ?? 0
+  broadcastSnapshot()
+}
+
+function loadCueById(id: string): void {
+  const cue = snapshot.program.cues.find((c) => c.id === id)
+  if (!cue) return
+  clearEndSequence()
+  stopTicker()
+  const { timer } = snapshot
+  timer.running = false
+  timer.activeCueId = cue.id
+  timer.endTimestamp = null
+  timer.startTimestamp = null
+  timer.pausedRemainingMs = null
+  snapshot.activeTitle = cue.title
+  snapshot.remainingMs = timer.mode === 'countup' ? 0 : cue.durationMs
+  broadcastSnapshot()
+}
+
+function advanceCue(autoStart = false): void {
+  clearEndSequence()
+  const { program, timer } = snapshot
+  const idx = timer.activeCueId
+    ? program.cues.findIndex((c) => c.id === timer.activeCueId)
+    : -1
+  const next = program.cues[idx + 1]
+
+  stopTicker()
+  timer.running = false
+  timer.endTimestamp = null
+  timer.startTimestamp = null
+  timer.pausedRemainingMs = null
+
+  if (next) {
+    timer.activeCueId = next.id
+    snapshot.activeTitle = next.title
+    snapshot.remainingMs = timer.mode === 'countup' ? 0 : next.durationMs
+    if (autoStart) {
+      startTimer()
+      return
+    }
+  } else {
+    timer.activeCueId = null
+    snapshot.activeTitle = ''
+    snapshot.remainingMs = 0
+  }
+  broadcastSnapshot()
+}
+
+function previousCue(): void {
+  clearEndSequence()
+  const { program, timer } = snapshot
+  const idx = timer.activeCueId
+    ? program.cues.findIndex((c) => c.id === timer.activeCueId)
+    : 0
+  const prev = program.cues[Math.max(0, idx - 1)]
+  if (!prev) return
+  stopTicker()
+  timer.running = false
+  timer.activeCueId = prev.id
+  timer.endTimestamp = null
+  timer.startTimestamp = null
+  timer.pausedRemainingMs = null
+  snapshot.activeTitle = prev.title
+  snapshot.remainingMs = timer.mode === 'countup' ? 0 : prev.durationMs
+  broadcastSnapshot()
+}
+
+function nudgeTimer(ms: number): void {
+  const { timer } = snapshot
+  if (timer.mode !== 'countdown') return
+
+  if (timer.running && timer.endTimestamp !== null) {
+    timer.endTimestamp += ms
+  } else {
+    const base = computeRemainingMs()
+    timer.pausedRemainingMs = Math.max(0, base + ms)
+  }
+  snapshot.remainingMs = computeRemainingMs()
+  broadcastSnapshot()
+}
+
+function setMessage(msg: Message | null): void {
+  if (messageClearTimer) {
+    clearTimeout(messageClearTimer)
+    messageClearTimer = null
+  }
   snapshot.message = msg
   broadcastSnapshot()
-  
-  // Auto-clear if specified
-  if (msg?.autoClearMs && msg.autoClearMs > 0) {
-    setTimeout(() => {
+
+  if (msg?.visible && msg.autoClearMs && msg.autoClearMs > 0) {
+    messageClearTimer = setTimeout(() => {
       if (snapshot.message === msg) {
         snapshot.message = { ...msg, visible: false }
         broadcastSnapshot()
@@ -320,125 +485,106 @@ function setMessage(msg: Message | null) {
   }
 }
 
-function setBlackout(enabled: boolean) {
-  snapshot.blackout = enabled;
-  broadcastSnapshot();
-}
-
-function updateSettings(partial: Partial<Settings>) {
-  snapshot.settings = { ...snapshot.settings, ...partial };
-  broadcastSnapshot();
-}
-
-function updateProgram(program: Program) {
-  snapshot.program = program;
-  if (!snapshot.timer.activeCueId && program.cues.length > 0) {
-    snapshot.activeTitle = program.cues[0].title;
-    snapshot.remainingMs = program.cues[0].durationMs;
+function updateProgram(program: Program): void {
+  snapshot.program = program
+  const cue = activeCue()
+  if (!cue) {
+    // active cue was removed — fall back to nothing running
+    snapshot.timer.activeCueId = null
+    snapshot.activeTitle = ''
   }
-  broadcastSnapshot();
-}
-
-function setTimerMode(mode: TimerState['mode']) {
-  const wasRunning = snapshot.timer.running;
-  if (wasRunning) pauseTimer();
-  
-  snapshot.timer.mode = mode;
-  snapshot.timer.startTimestamp = null;
-  snapshot.timer.endTimestamp = null;
-  snapshot.timer.pausedRemainingMs = null;
-  
-  if (mode === 'countdown' && snapshot.program.cues.length > 0) {
-    snapshot.remainingMs = snapshot.program.cues[0].durationMs;
-  } else if (mode === 'countup') {
-    snapshot.remainingMs = 0;
+  if (!snapshot.timer.running && !snapshot.timer.activeCueId) {
+    snapshot.remainingMs =
+      snapshot.timer.mode === 'countup' ? 0 : program.cues[0]?.durationMs ?? 0
   }
-  
-  broadcastSnapshot();
+  persist()
+  broadcastSnapshot()
 }
 
-function startTicker() {
-  if (tickInterval) return;
-  tickInterval = setInterval(tick, 100);
+function updateSettings(partial: Partial<Settings>): void {
+  snapshot.settings = { ...snapshot.settings, ...partial }
+  persist()
+  broadcastSnapshot()
 }
 
-function stopTicker() {
-  if (tickInterval) {
-    clearInterval(tickInterval);
-    tickInterval = null;
+function setTimerMode(mode: TimerMode): void {
+  clearEndSequence()
+  if (snapshot.timer.running) pauseTimer()
+  const { timer, program } = snapshot
+  timer.mode = mode
+  timer.startTimestamp = null
+  timer.endTimestamp = null
+  timer.pausedRemainingMs = null
+  if (mode === 'countdown') {
+    snapshot.remainingMs = activeCue()?.durationMs ?? program.cues[0]?.durationMs ?? 0
+  } else {
+    snapshot.remainingMs = 0
   }
+  broadcastSnapshot()
 }
 
-function setupIpc() {
-  ipcMain.handle('get-snapshot', () => snapshot);
-  
-  ipcMain.on('start-timer', () => startTimer());
-  ipcMain.on('pause-timer', () => pauseTimer());
-  ipcMain.on('reset-timer', () => resetTimer());
-  ipcMain.on('advance-cue', () => advanceCue());
-  ipcMain.on('previous-cue', () => previousCue());
-  ipcMain.on('nudge-timer', (_e, ms: number) => {
-    if (snapshot.timer.mode === 'countdown' && snapshot.timer.running && snapshot.timer.endTimestamp) {
-      snapshot.timer.endTimestamp += ms;
-      broadcastSnapshot();
-    }
-  });
-  ipcMain.on('set-message', (_e, msg: Message | null) => setMessage(msg));
-  ipcMain.on('set-blackout', (_e, enabled: boolean) => setBlackout(enabled));
-  ipcMain.on('update-settings', (_e, partial: Partial<Settings>) => updateSettings(partial));
-  ipcMain.on('update-program', (_e, program: Program) => updateProgram(program));
-  ipcMain.on('set-timer-mode', (_e, mode: TimerState['mode']) => setTimerMode(mode));
-  
-  ipcMain.on('open-stage', () => {
-    if (!stageWindow) createStageWindow();
-    else stageWindow.show();
-  });
-  
+// ---------------------------------------------------------------------------
+// IPC
+// ---------------------------------------------------------------------------
+
+function setupIpc(): void {
+  ipcMain.handle('get-snapshot', () => snapshot)
+  ipcMain.handle('displays:get-all', () => serializeDisplays())
+
+  ipcMain.on('start-timer', () => startTimer())
+  ipcMain.on('pause-timer', () => pauseTimer())
+  ipcMain.on('reset-timer', () => resetTimer())
+  ipcMain.on('advance-cue', () => advanceCue())
+  ipcMain.on('previous-cue', () => previousCue())
+  ipcMain.on('load-cue', (_e, id: string) => loadCueById(id))
+  ipcMain.on('nudge-timer', (_e, ms: number) => nudgeTimer(ms))
+  ipcMain.on('set-message', (_e, msg: Message | null) => setMessage(msg))
+  ipcMain.on('set-blackout', (_e, enabled: boolean) => {
+    snapshot.blackout = enabled
+    broadcastSnapshot()
+  })
+  ipcMain.on('update-settings', (_e, partial: Partial<Settings>) => updateSettings(partial))
+  ipcMain.on('update-program', (_e, program: Program) => updateProgram(program))
+  ipcMain.on('set-timer-mode', (_e, mode: TimerMode) => setTimerMode(mode))
+
   ipcMain.on('open-display', () => {
-    if (!displayWindow) createDisplayWindow();
-    else displayWindow.show();
-  });
-ipcMain.on('close-stage', () => stageWindow?.close());
-  
-  ipcMain.on('close-display', () => displayWindow?.close());
-  
+    if (!displayWindow) createDisplayWindow()
+    else displayWindow.focus()
+  })
+  ipcMain.on('close-display', () => displayWindow?.close())
+  ipcMain.on('toggle-fullscreen', () => {
+    if (displayWindow) displayWindow.setFullScreen(!displayWindow.isFullScreen())
+  })
   ipcMain.on('display:set-monitor', (_e, displayId: number) => {
-    const displays = screen.getAllDisplays();
-    const target = displays.find(d => d.id === displayId) || displays[0];
-    if (target && displayWindow) {
-      const { x, y, width, height } = target.bounds;
-      displayWindow.setBounds({ x, y, width, height });
-      displayWindow.setFullScreen(true);
-    }
-  });
-
-  ipcMain.handle('displays:get-all', () => {
-    return screen.getAllDisplays().map(d => ({
-      id: d.id,
-      bounds: d.bounds,
-      size: d.size,
-      workArea: d.workArea,
-      scaleFactor: d.scaleFactor,
-      internal: d.internal,
-      rotation: d.rotation,
-    }))
+    const target = screen.getAllDisplays().find((d) => d.id === displayId)
+    if (target) placeDisplayOnMonitor(target)
   })
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
 app.whenReady().then(() => {
-  createMainWindow();
-  setupIpc();
-  
+  createControlWindow()
+  setupIpc()
+
+  const onDisplaysChanged = (): void => {
+    if (displayWindow) placeDisplayOnMonitor(pickExternalDisplay())
+    controlWindow?.webContents.send('displays-changed', serializeDisplays())
+  }
+  screen.on('display-added', onDisplaysChanged)
+  screen.on('display-removed', onDisplaysChanged)
+  screen.on('display-metrics-changed', onDisplaysChanged)
+
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
-  });
-});
+    if (BrowserWindow.getAllWindows().length === 0) createControlWindow()
+  })
+})
 
 app.on('window-all-closed', () => {
-  stopTicker();
-  if (process.platform !== 'darwin') app.quit();
-});
+  stopTicker()
+  if (process.platform !== 'darwin') app.quit()
+})
 
-app.on('before-quit', () => {
-  stopTicker();
-});
+app.on('before-quit', () => stopTicker())

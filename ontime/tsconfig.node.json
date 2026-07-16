@@ -2,18 +2,17 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "dist-electron",
-    "rootDir": "src",
-    "declaration": true,
+    "noEmit": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "noEmit": false
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"]
   },
-  "include": ["src/main/**/*", "src/preload/**/*"],
-  "exclude": ["node_modules", "dist-electron"]
+  "include": ["src/main/**/*", "src/preload/**/*", "electron-vite.config.ts"]
 }

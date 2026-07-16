@@ -5,18 +5,19 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
-    "build:win": "electron-builder --win nsis"
+    "build:win": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "zustand": "^4.4.7"
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.39",
     "@types/react-dom": "^18.2.17",
@@ -24,7 +25,6 @@
     "electron": "^27.0.0",
     "electron-builder": "^24.9.1",
     "electron-vite": "^2.1.0",
-    "tailwindcss": "^4.0.0",
     "typescript": "^5.3.2",
     "vite": "^5.0.0"
   }

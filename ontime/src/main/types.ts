@@ -29,16 +29,30 @@ export type Message = {
   autoClearMs?: number | null;
 };
 
+export type MessageFont = 'sans' | 'serif' | 'mono' | 'condensed';
+
+/** High-level visual phase, computed by the main process. */
+export type Phase = 'normal' | 'warning' | 'timeup' | 'transition';
+
 export type Settings = {
   bg: string;
   digitColor: string;
+  warnBg: string;        // background color during the warning window
+  overBg: string;        // background color once time is up
   warningPct: number;
   overtime: boolean;
+  timeUpSec: number;     // how long "TIME UP" holds before the transition
+  transitionSec: number; // "up next" countdown length before auto-advancing
+  msgFont: MessageFont;
+  msgScale: number;      // message size multiplier
+  msgColor: string;
   showTitle: boolean;
   showClock: boolean;
   showProgress: boolean;
   showMessage: boolean;
 };
+
+export type UpNext = { title: string; countdownMs: number } | null;
 
 export type Snapshot = {
   timer: TimerState;
@@ -48,13 +62,23 @@ export type Snapshot = {
   message: Message | null;
   blackout: boolean;
   settings: Settings;
+  phase: Phase;
+  overMs: number;   // ms elapsed past zero (>= 0)
+  upNext: UpNext;   // populated during the transition phase
 };
 
 export const DEFAULT_SETTINGS: Settings = {
   bg: '#000000',
   digitColor: '#F5F5F5',
+  warnBg: '#F5A524',
+  overBg: '#E5484D',
   warningPct: 0.2,
   overtime: true,
+  timeUpSec: 10,
+  transitionSec: 30,
+  msgFont: 'sans',
+  msgScale: 1,
+  msgColor: '#FFFFFF',
   showTitle: true,
   showClock: true,
   showProgress: true,
@@ -80,5 +104,3 @@ export const DEFAULT_TIMER_STATE: TimerState = {
   pausedRemainingMs: null,
   activeCueId: null,
 };
-
-export const DEFAULT_MESSAGE: Message | null = null;

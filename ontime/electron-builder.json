@@ -6,18 +6,18 @@
     "buildResources": "build"
   },
   "files": [
-    "out/**/*",
-    "dist-renderer/**/*"
+    "out/**/*"
   ],
   "win": {
-    "target": "nsis",
-    "icon": "build/icon.ico"
+    "target": "nsis"
   },
   "nsis": {
     "oneClick": false,
+    "perMachine": false,
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
-    "createStartMenuShortcut": true
+    "createStartMenuShortcut": true,
+    "shortcutName": "ontime"
   },
   "extraResources": []
 }
